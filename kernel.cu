@@ -1,4 +1,3 @@
-
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
@@ -17,7 +16,13 @@ bool arrayMalloc(ArrayType_t** a, ArrayType_t** b, ArrayType_t** c, int size);
 void arrayFree(ArrayType_t* a, ArrayType_t* b, ArrayType_t* c);
 void arrayInit(ArrayType_t* a, ArrayType_t* b, ArrayType_t* c, int size);
 void addCPUVec(ArrayType_t* a, ArrayType_t* b, ArrayType_t* c, int size);
+cudaError_t addWithCuda(ArrayType_t *c, const ArrayType_t *a, const ArrayType_t *b, unsigned int size);
 
+__global__ void addKernel(int *c, const int *a, const int *b)
+{
+	int i = threadIdx.x;
+	c[i] = a[i] + b[i];
+}
 int main(int argc, char* argv[])
 {
 	int size = 10;
@@ -42,7 +47,7 @@ int main(int argc, char* argv[])
 
 		HighPrecisionTime timer;
 		double totalTime = 0.0;
-		
+
 
 		arrayInit(a, b, c, size);
 
@@ -57,8 +62,8 @@ int main(int argc, char* argv[])
 			totalTime += timer.TimeSinceLastCall();
 		}
 
-		cout << "totalTime for c = a + b: " << totalTime/stoi(argv[2]) << endl;
-		
+		cout << "totalTime for c = a + b: " << totalTime / stoi(argv[2]) << endl;
+
 	}
 	catch (char* error)
 	{
@@ -98,7 +103,7 @@ void arrayFree(ArrayType_t* a, ArrayType_t* b, ArrayType_t* c)
 void arrayInit(ArrayType_t* a, ArrayType_t* b, ArrayType_t* c, int size)
 {
 	srand(time(NULL));
-	
+
 	for (int i = 0; i < size; i++)
 	{
 		//fill a with random numbers
@@ -116,4 +121,87 @@ void addCPUVec(ArrayType_t* a, ArrayType_t* b, ArrayType_t* c, int size)
 	{
 		c[i] = a[i] + b[i];
 	}
+}
+cudaError_t addWithCuda(ArrayType_t *c, const ArrayType_t *a, const ArrayType_t *b, unsigned int size)
+{
+	int *dev_a = 0;
+	int *dev_b = 0;
+	int *dev_c = 0;
+	cudaError_t cudaStatus;
+	int arraySize = size * sizeof(ArrayType_t);
+	HighPrecisionTime timer;
+	double totalTime = 0.0;
+
+	try
+	{
+		// Choose which GPU to run on, change this on a multi-GPU system.
+		cudaStatus = cudaSetDevice(0);
+		if (cudaStatus != cudaSuccess) {
+			throw("setDevice Failed");
+		}
+
+		// Allocate GPU buffers for three vectors (two input, one output)    .
+		cudaStatus = cudaMalloc((void**)&dev_c, arraySize);
+		if (cudaStatus != cudaSuccess) {
+			throw("malloc of c failed");
+		}
+
+		cudaStatus = cudaMalloc((void**)&dev_a, arraySize);
+		if (cudaStatus != cudaSuccess) {
+			throw("malloc of a failed");
+		}
+
+		cudaStatus = cudaMalloc((void**)&dev_b, arraySize);
+		if (cudaStatus != cudaSuccess) {
+			throw("malloc of b failed");
+		}
+
+		// Copy input vectors from host memory to GPU buffers.
+		cudaStatus = cudaMemcpy(dev_a, a, arraySize, cudaMemcpyHostToDevice);
+		if (cudaStatus != cudaSuccess) {
+			throw("copy of a failed");
+		}
+
+		cudaStatus = cudaMemcpy(dev_b, b, size * sizeof(int), cudaMemcpyHostToDevice);
+		if (cudaStatus != cudaSuccess) {
+			throw("copy of b failed");
+		}
+
+		// Launch a kernel on the GPU with one thread for each element.
+		timer.TimeSinceLastCall();
+		addKernel << <1, size >> >(dev_c, dev_a, dev_b);
+
+		// Check for any errors launching the kernel
+		cudaStatus = cudaGetLastError();
+		if (cudaStatus != cudaSuccess) {
+			throw("addKernel failed");
+		}
+
+		// cudaDeviceSynchronize waits for the kernel to finish, and returns
+		// any errors encountered during the launch.
+		cudaStatus = cudaDeviceSynchronize();
+		if (cudaStatus != cudaSuccess) {
+			throw("syncronize failed");
+		}
+		totalTime += timer.TimeSinceLastCall();
+
+		// Copy output vector from GPU buffer to host memory.
+		cudaStatus = cudaMemcpy(c, dev_c, arraySize, cudaMemcpyDeviceToHost);
+		if (cudaStatus != cudaSuccess) {
+			throw("copy from device c to host c failed");
+		}
+	}
+	catch (char* error)
+	{
+		printf("Error Message: %c", error);
+		goto Error;
+	}
+	
+
+Error:
+	cudaFree(dev_c);
+	cudaFree(dev_a);
+	cudaFree(dev_b);
+
+	return cudaStatus;
 }
