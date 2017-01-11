@@ -61,7 +61,7 @@ int main(int argc, char* argv[])
 
 		for each (int k in sizes)
 			for each (int repCount in reps) {
-				printf("---------------------");
+				printf("--------------------- \n");
 				cout << "Array Size: " << k << endl;
 				cout << "Rep Count: " << repCount << endl;
 
@@ -69,22 +69,9 @@ int main(int argc, char* argv[])
 				{
 					throw("Allocation Failed");
 				}
-				cout << "here" << endl;
-				//arrayInit(a, b, c, k);
-				srand(time(NULL));
 
-				for (int i = 0; i < size; i++)
-				{
-					//cout << i << endl;
-					//fill a with random numbers
-					a[i] = (rand() % size) + 1;
-					//fill b with random numbers
-					b[i] = (rand() % size) + 1;
-					//fill c with 0s
-					c[i] = 1;
-				}
-
-
+				arrayInit(a, b, c, k);
+		
 				for (int i = 0; i < repCount; i++)
 				{
 					timer.TimeSinceLastCall();
@@ -99,8 +86,6 @@ int main(int argc, char* argv[])
 				arrayFree(a, b, c);
 
 				printf("------------------- \n");
-				
-
 			}
 
 	}
@@ -144,15 +129,13 @@ void arrayInit(ArrayType_t* a, ArrayType_t* b, ArrayType_t* c, int size)
 
 	for (int i = 0; i < size; i++)
 	{
-		cout << i << endl;
 		//fill a with random numbers
 		a[i] = (rand() % size) + 1;
 		//fill b with random numbers
 		b[i] = (rand() % size) + 1;
 		//fill c with 0s
-		c[i] = 1;
+		c[i] = 0;
 	}
-
 }
 void addCPUVec(ArrayType_t* a, ArrayType_t* b, ArrayType_t* c, int size)
 {
