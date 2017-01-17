@@ -1,4 +1,3 @@
-
 #include <opencv2/core/core.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/highgui/highgui.hpp>
@@ -9,6 +8,7 @@
 
 using namespace cv;
 using namespace std;
+
 //GLOBALS
 int thresholdSlider;
 const int THRESHOLD_SLIDER_MAX = 255;
@@ -19,11 +19,12 @@ unsigned char *dev0_image;
 unsigned char *devCopy_image;
 int imageSize = 0;
 //GLOBALS
+
 __global__ void kernel(unsigned char* imageOrig, unsigned char* imageCopy, unsigned char threshold)
 {
-	
+
 	int j = blockIdx.x * blockDim.x + threadIdx.x;
-	
+
 	if (imageOrig[j] > threshold)
 	{
 		imageCopy[j] = 255;
@@ -41,7 +42,7 @@ void on_Trackbar(int, void *)
 {
 	int blocksNeeded = (imageSize + deviceProps.maxThreadsPerBlock - 1) / deviceProps.maxThreadsPerBlock;
 	//use kernel to threshold dev0_image, then write to devCopy_image
-	kernel<<<blocksNeeded, deviceProps.maxThreadsPerBlock>>>(dev0_image, devCopy_image, thresholdSlider);
+	kernel << <blocksNeeded, deviceProps.maxThreadsPerBlock >> >(dev0_image, devCopy_image, thresholdSlider);
 	cudaDeviceSynchronize();
 
 	if (cudaMemcpy(hostImage.data, devCopy_image, imageSize, cudaMemcpyDeviceToHost) != cudaSuccess)
@@ -54,9 +55,9 @@ void on_Trackbar(int, void *)
 
 int main(int argc, char** argv)
 {
-	
+
 	//if 2 arguements arent passed, tell user there was an error
-	if (argc != 2){
+	if (argc != 2) {
 		cout << "Usage: display_image ImageToLoadAndDisplay" << endl;
 		return -1;
 	}
@@ -68,7 +69,7 @@ int main(int argc, char** argv)
 		cout << "Could not open or find the image" << endl;
 		return -1;
 	}
-	
+
 	//display image information
 	cout << "Image has: " << hostImage.channels() << " channels" << endl;
 	cout << "Image is " << hostImage.cols << "x" << hostImage.rows << endl;
@@ -76,14 +77,10 @@ int main(int argc, char** argv)
 	//convert image to grayscale
 	cvtColor(hostImage, hostImage, cv::COLOR_RGB2GRAY);
 
-	//time cpu threshold
-	//Threshold(hostImage, THRESHOLD);
-	//end time for cpu
-
 	thresholdWithCuda(&hostImage, THRESHOLD);
 
 	namedWindow("Display window", WINDOW_NORMAL);
-	resizeWindow("Display window", 1000, 900);
+	resizeWindow("Display window", 1900, 1080);
 	createTrackbar("Threshold", "Display window", &thresholdSlider, THRESHOLD_SLIDER_MAX, on_Trackbar);
 	imshow("Display window", hostImage);
 
@@ -111,11 +108,11 @@ void Threshold(Mat hostImage, unsigned char threshold)
 void thresholdWithCuda(Mat* hostImage, unsigned char threshold)
 {
 	cudaError_t cudaStatus;
-	
+
 	int height = hostImage->rows;
 	int width = hostImage->cols;
 	imageSize = height * width;
-	
+
 	try
 	{
 		//set device
@@ -148,10 +145,10 @@ void thresholdWithCuda(Mat* hostImage, unsigned char threshold)
 		{
 			throw("mem copy failed");
 		}
-		
+
 		int blocksNeeded = (imageSize + deviceProps.maxThreadsPerBlock - 1) / deviceProps.maxThreadsPerBlock;
 		//use kernel to threshold dev0_image, then write to devCopy_image
-		kernel<<<blocksNeeded, deviceProps.maxThreadsPerBlock>>>(dev0_image, devCopy_image, threshold);
+		kernel << <blocksNeeded, deviceProps.maxThreadsPerBlock >> >(dev0_image, devCopy_image, threshold);
 		if (cudaGetLastError() != cudaSuccess)
 			throw("add Kernel failed");
 		cudaStatus = cudaDeviceSynchronize();
