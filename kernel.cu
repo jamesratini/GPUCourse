@@ -1,257 +1,94 @@
+
+#include <opencv2/core/core.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/highgui/highgui.hpp>
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
-
+#include <stdio.h>
 #include <iostream>
-#include <string>
-#include <stdlib.h>
-#include <vector>
-#include <ctime>
-#include "../HighPerformanceTimer/HighPerformanceTimer.h"
 
-
+using namespace cv;
 using namespace std;
 
-typedef int ArrayType_t;
 
-bool arrayMalloc(ArrayType_t** a, ArrayType_t** b, ArrayType_t** c, int size);
-void arrayFree(ArrayType_t* a, ArrayType_t* b, ArrayType_t* c);
-void arrayInit(ArrayType_t* a, ArrayType_t* b, ArrayType_t* c, int size);
-void addCPUVec(ArrayType_t* a, ArrayType_t* b, ArrayType_t* c, int size);
-cudaError_t addWithCuda(ArrayType_t *c, const ArrayType_t *a, const ArrayType_t *b, unsigned int size, int repCount);
-
-__global__ void addKernel(ArrayType_t *c, const ArrayType_t *a, const ArrayType_t *b, int size)
+__global__ void addKernel(int *c, const int *a, const int *b)
 {
-	int i = blockIdx.x * blockDim.x + threadIdx.x;
-	if (i < size)
-	{
-		c[i] = a[i] + b[i];
-	}
-
+    int i = threadIdx.x;
+    c[i] = a[i] + b[i];
 }
-int main(int argc, char* argv[])
+unsigned char* BoxFilter(unsigned char* src, unsigned char* dst, int imgW, int imgH, unsigned char* kernelArray, int kW, int kH, unsigned char* temp);
+
+int main(int argc, char** argv)
 {
-	int size = 10;
+	Mat hostImage;
+	unsigned char* imageDst;
+	unsigned char* temp;
+	unsigned char K[] = { 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+	int imgWidth = 0;
+	int imgHeight = 0;
 
-	//check if argv[1] is valid
-	if (argc > 1)
-	{
-		size = stoi(argv[1]);
+	//if 2 arguements arent passed, tell user there was an error
+	if (argc != 2) {
+		cout << "Usage: display_image ImageToLoadAndDisplay" << endl;
+		return -1;
 	}
 
-	if (argv[2] == NULL)
-	{
-		argv[2] = "100";
+	//set hostImage to command argument
+	hostImage = imread(argv[1], CV_LOAD_IMAGE_COLOR);
+
+	if (!hostImage.data) {
+		cout << "Could not open or find the image" << endl;
+		return -1;
 	}
 
-	ArrayType_t* a = nullptr;
-	ArrayType_t* b = nullptr;
-	ArrayType_t* c = nullptr;
-	vector<int> sizes = { 100, 1000, 10000, 100000, 1000000 };
-	vector<int> reps = { 10, 100, 1000 };
+	//display image information
+	cout << "Image has: " << hostImage.channels() << " channels" << endl;
+	cout << "Image is " << hostImage.cols << "x" << hostImage.rows << endl;
 
+	//convert image to grayscale
+	cvtColor(hostImage, hostImage, cv::COLOR_RGB2GRAY);
+
+	imgWidth = hostImage.cols;
+	imgHeight = hostImage.rows;
+	imageDst = hostImage.data;
+	temp = hostImage.data;
+
+	temp = BoxFilter(hostImage.data, imageDst, imgWidth, imgHeight, K, 3, 3, temp);
+	hostImage.data = temp;
 	
+	namedWindow("Display window", WINDOW_NORMAL);
+	resizeWindow("Display window", 1900, 1080);
+	imshow("Display window", hostImage);
 
-	try
-	{
-		//allocate and verify success
-		
-
-		HighPrecisionTime timer;
-		double cpuTime = 0.0;
-
-		for each (int k in sizes)
-			for each (int repCount in reps) {
-				printf("--------------------- \n");
-				cout << "Array Size: " << k << endl;
-				cout << "Rep Count: " << repCount << endl;
-
-				if (!arrayMalloc(&a, &b, &c, k))
-				{
-					throw("Allocation Failed");
-				}
-
-				arrayInit(a, b, c, k);
-		
-				for (int i = 0; i < repCount; i++)
-				{
-					timer.TimeSinceLastCall();
-					addCPUVec(a, b, c, size);
-					cpuTime += timer.TimeSinceLastCall();
-				}
-
-				cout << "Average time on cpu to compute c = a + b: " << cpuTime / repCount << endl;
-
-				addWithCuda(c, a, b, k, repCount);
-
-				arrayFree(a, b, c);
-
-				printf("------------------- \n");
-			}
-
-	}
-	catch (char* error)
-	{
-		cout << "An Exception Occured: " << error << endl;
-	}
-
-#ifdef _WIN32 || _WIN64
-	system("pause");
-#endif
-	
-
-
+	waitKey(0);
 	return 0;
 }
 
-bool arrayMalloc(ArrayType_t** a, ArrayType_t** b, ArrayType_t** c, int size)
+unsigned char* BoxFilter(unsigned char* src, unsigned char* dst, int imgW, int imgH, unsigned char* kernelArray, int kW, int kH, unsigned char* temp)
 {
-	bool retVal = false;
-	*a = (ArrayType_t*)malloc(size * sizeof(ArrayType_t));
-	*b = (ArrayType_t*)malloc(size * sizeof(ArrayType_t));
-	*c = (ArrayType_t*)malloc(size * sizeof(ArrayType_t));
-
-	if (*a != NULL && *b != NULL && *c != NULL)
+	int currentPixel = 0;
+	unsigned char sumOfColor = 0;
+	for (int i = 0; i < imgW; i++)
 	{
-		retVal = true;
-	}
-
-	return retVal;
-}
-void arrayFree(ArrayType_t* a, ArrayType_t* b, ArrayType_t* c)
-{
-	free(a);
-	free(b);
-	free(c);
-}
-void arrayInit(ArrayType_t* a, ArrayType_t* b, ArrayType_t* c, int size)
-{
-	srand(time(NULL));
-
-	for (int i = 0; i < size; i++)
-	{
-		//fill a with random numbers
-		a[i] = (rand() % size) + 1;
-		//fill b with random numbers
-		b[i] = (rand() % size) + 1;
-		//fill c with 0s
-		c[i] = 0;
-	}
-}
-void addCPUVec(ArrayType_t* a, ArrayType_t* b, ArrayType_t* c, int size)
-{
-	for (int i = 0; i < size; i++)
-	{
-		c[i] = a[i] + b[i];
-	}
-}
-cudaError_t addWithCuda(ArrayType_t *c, const ArrayType_t *a, const ArrayType_t *b, unsigned int size, int repCount)
-{
-	ArrayType_t *dev_a = 0;
-	ArrayType_t *dev_b = 0;
-	ArrayType_t *dev_c = 0;
-	cudaError_t cudaStatus;
-	int arraySize = size * sizeof(ArrayType_t);
-	HighPrecisionTime timer;
-	double gpuTime = 0.0;
-	double memCopyTime = 0.0;
-	double memCCopy = 0.0;
-	cudaDeviceProp deviceProps;
-
-	
-
-	try
-	{
-		// Choose which GPU to run on, change this on a multi-GPU system.
-		cudaStatus = cudaSetDevice(0);
-		if (cudaStatus != cudaSuccess) {
-			throw("setDevice Failed");
-		}
-		//check device props
-		cudaStatus = cudaGetDeviceProperties(&deviceProps, 0);
-		if (cudaStatus != cudaSuccess){
-			throw("getDeviceProperties failed");
-		}
-
-		// Allocate GPU buffers for three vectors (two input, one output)    .
-		cudaStatus = cudaMalloc((void**)&dev_c, arraySize);
-		if (cudaStatus != cudaSuccess) {
-			throw("malloc of c failed");
-		}
-
-		cudaStatus = cudaMalloc((void**)&dev_a, arraySize);
-		if (cudaStatus != cudaSuccess) {
-			throw("malloc of a failed");
-		}
-
-		cudaStatus = cudaMalloc((void**)&dev_b, arraySize);
-		if (cudaStatus != cudaSuccess) {
-			throw("malloc of b failed");
-		}
-
-		//time memory copy
-		timer.TimeSinceLastCall();
-		// Copy input vectors from host memory to GPU buffers.
-		cudaStatus = cudaMemcpy(dev_a, a, arraySize, cudaMemcpyHostToDevice);
-		if (cudaStatus != cudaSuccess) {
-			throw("copy of a failed");
-		}
-
-		cudaStatus = cudaMemcpy(dev_b, b, size * sizeof(int), cudaMemcpyHostToDevice);
-		if (cudaStatus != cudaSuccess) {
-			throw("copy of b failed");
-		}
-		
-		memCopyTime = timer.TimeSinceLastCall();
-		cout << "Memory copy took: " << memCopyTime << endl;
-
-		int blocksNeeded = (size + deviceProps.maxThreadsPerBlock - 1) / deviceProps.maxThreadsPerBlock;
-		cout << "Will launch " << blocksNeeded << " block(s) of " << deviceProps.maxThreadsPerBlock << " threads" << endl;
-
-		//loop through reps, addKernel everytime
-		
-		for (int i = 0; i < repCount; i++)
+		for (int j = 0; j < imgH; j++)
 		{
-			timer.TimeSinceLastCall();
-			addKernel << < blocksNeeded, deviceProps.maxThreadsPerBlock >> >(dev_c, dev_a, dev_b, size);
-			if (cudaGetLastError() != cudaSuccess)
-				throw("add Kernel failed");
-			cudaStatus = cudaDeviceSynchronize();
-			gpuTime += timer.TimeSinceLastCall();
-
+			//identify our current pixel
+			currentPixel = i * j;
+			int count = 0;
+			//for every neighboring pixel within radius in the x direction
+			for (int k = 0; k < kW; k++)
+			{
+				//for everything neighboring pixel within radius in the y direction
+				for (int l = 0; l < kH; l++)
+				{
+					sumOfColor += src[currentPixel + k + l] * kernelArray[count];
+					count++;
+				}
+			}
+			//divide sum by kernel.size() and store at dst[currentPixel]
+			dst[currentPixel] = sumOfColor / (kW*kH);
 		}
-			
-
-			
-
-		
-
-		cout << "Average time for GPU to compute: " << gpuTime / repCount << endl;
-
-		//time last copy
-		timer.TimeSinceLastCall();
-		cudaStatus = cudaMemcpy(c, dev_c, arraySize, cudaMemcpyDeviceToHost);
-		if (cudaStatus != cudaSuccess) {
-			throw("copy from device c to host c failed");
-		}
-		memCCopy = timer.TimeSinceLastCall();
-		cout << "Time to move c from device to host: " << memCCopy << endl;
-
-		double grandTotal = memCCopy + gpuTime + memCopyTime;
-		
-		cout << "Grand total time spent in gpu: " << grandTotal << endl;
-
-	}
-	catch (char* error)
-	{
-		cout << "error message: " << error << endl;
-		goto Error;
 	}
 
-
-Error:
-	cudaFree(dev_c);
-	cudaFree(dev_a);
-	cudaFree(dev_b);
-
-	return cudaStatus;
+	return dst;
 }
