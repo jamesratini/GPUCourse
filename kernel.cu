@@ -1,4 +1,3 @@
-
 #include <opencv2/core/core.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/highgui/highgui.hpp>
@@ -10,17 +9,53 @@
 using namespace cv;
 using namespace std;
 
+//GLOBALS
+int thresholdSlider;
+const int THRESHOLD_SLIDER_MAX = 255;
+cudaDeviceProp deviceProps;
+Mat hostImage;
+unsigned char THRESHOLD = 120;
+unsigned char *dev0_image;
+unsigned char *devCopy_image;
+int imageSize = 0;
+//GLOBALS
 
-__global__ void addKernel(int *c, const int *a, const int *b)
+__global__ void kernel(unsigned char* imageOrig, unsigned char* imageCopy, unsigned char threshold)
 {
-    int i = threadIdx.x;
-    c[i] = a[i] + b[i];
+
+	int j = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if (imageOrig[j] > threshold)
+	{
+		imageCopy[j] = 255;
+	}
+	else
+	{
+		imageCopy[j] = 0;
+	}
 }
+
+void Threshold(Mat image, unsigned char threshold);
+void thresholdWithCuda(Mat* image, unsigned char threshold);
 unsigned char* BoxFilter(unsigned char* src, unsigned char* dst, int imgW, int imgH, unsigned char* kernelArray, int kW, int kH, unsigned char* temp);
+
+void on_Trackbar(int, void *)
+{
+	int blocksNeeded = (imageSize + deviceProps.maxThreadsPerBlock - 1) / deviceProps.maxThreadsPerBlock;
+	//use kernel to threshold dev0_image, then write to devCopy_image
+	kernel << <blocksNeeded, deviceProps.maxThreadsPerBlock >> >(dev0_image, devCopy_image, thresholdSlider);
+	cudaDeviceSynchronize();
+
+	if (cudaMemcpy(hostImage.data, devCopy_image, imageSize, cudaMemcpyDeviceToHost) != cudaSuccess)
+	{
+		throw("trackbar memcopy failed");
+	}
+
+	imshow("Display window", hostImage);
+}
 
 int main(int argc, char** argv)
 {
-	Mat hostImage;
 	unsigned char* imageDst;
 	unsigned char* temp;
 	unsigned char K[] = { 1, 1, 1, 1, 1, 1, 1, 1, 1 };
@@ -48,6 +83,8 @@ int main(int argc, char** argv)
 	//convert image to grayscale
 	cvtColor(hostImage, hostImage, cv::COLOR_RGB2GRAY);
 
+	//thresholdWithCuda(&hostImage, THRESHOLD);
+
 	imgWidth = hostImage.cols;
 	imgHeight = hostImage.rows;
 	imageDst = hostImage.data;
@@ -55,38 +92,115 @@ int main(int argc, char** argv)
 
 	temp = BoxFilter(hostImage.data, imageDst, imgWidth, imgHeight, K, 3, 3, temp);
 	hostImage.data = temp;
-	
+
 	namedWindow("Display window", WINDOW_NORMAL);
 	resizeWindow("Display window", 1900, 1080);
+	createTrackbar("Threshold", "Display window", &thresholdSlider, THRESHOLD_SLIDER_MAX, on_Trackbar);
 	imshow("Display window", hostImage);
 
 	waitKey(0);
 	return 0;
 }
 
+void Threshold(Mat hostImage, unsigned char threshold)
+{
+	int height = hostImage.rows;
+	int width = hostImage.cols;
+
+	for (int i = 0; i < height*width; i++)
+	{
+		if (hostImage.data[i] > threshold)
+		{
+			hostImage.data[i] = 255;
+		}
+		else
+		{
+			hostImage.data[i] = 0;
+		}
+	}
+}
+void thresholdWithCuda(Mat* hostImage, unsigned char threshold)
+{
+	cudaError_t cudaStatus;
+
+	int height = hostImage->rows;
+	int width = hostImage->cols;
+	imageSize = height * width;
+
+	try
+	{
+		//set device
+		cudaStatus = cudaSetDevice(0);
+		if (cudaStatus != cudaSuccess)
+		{
+			throw("error in set device");
+		}
+		//check device props
+		cudaStatus = cudaGetDeviceProperties(&deviceProps, 0);
+		if (cudaStatus != cudaSuccess) {
+			throw("getDeviceProperties failed");
+		}
+		//malloc original image and copy image
+		cudaStatus = cudaMalloc((void**)&dev0_image, imageSize);
+		if (cudaStatus != cudaSuccess)
+		{
+			throw("cudaMalloc failed");
+		}
+
+		cudaStatus = cudaMalloc((void**)&devCopy_image, imageSize);
+		if (cudaStatus != cudaSuccess)
+		{
+			throw("cudaMalloc failed");
+		}
+
+		//copy original to gpu
+		cudaStatus = cudaMemcpy(dev0_image, hostImage->data, imageSize, cudaMemcpyHostToDevice);
+		if (cudaStatus != cudaSuccess)
+		{
+			throw("mem copy failed");
+		}
+
+		int blocksNeeded = (imageSize + deviceProps.maxThreadsPerBlock - 1) / deviceProps.maxThreadsPerBlock;
+		//use kernel to threshold dev0_image, then write to devCopy_image
+		kernel << <blocksNeeded, deviceProps.maxThreadsPerBlock >> >(dev0_image, devCopy_image, threshold);
+		if (cudaGetLastError() != cudaSuccess)
+			throw("add Kernel failed");
+		cudaStatus = cudaDeviceSynchronize();
+
+		cudaStatus = cudaMemcpy(hostImage->data, devCopy_image, imageSize, cudaMemcpyDeviceToHost);
+		if (cudaStatus != cudaSuccess)
+		{
+			throw("mem copy failed");
+		}
+	}
+	catch (char* error)
+	{
+		cout << error << endl;
+		goto bad_exit;
+	}
+bad_exit:
+	cudaFree((void*)&dev0_image);
+	cudaFree((void*)&devCopy_image);
+}
 unsigned char* BoxFilter(unsigned char* src, unsigned char* dst, int imgW, int imgH, unsigned char* kernelArray, int kW, int kH, unsigned char* temp)
 {
-	int currentPixel = 0;
-	unsigned char sumOfColor = 0;
-	for (int i = 0; i < imgW; i++)
+	float sumOfColor = 0;
+	for (int i = 1; i < imgW - 1; i++)
 	{
-		for (int j = 0; j < imgH; j++)
+		for (int j = 1; j < imgH - 1; j++)
 		{
-			//identify our current pixel
-			currentPixel = i * j;
 			int count = 0;
 			//for every neighboring pixel within radius in the x direction
-			for (int k = 0; k < kW; k++)
+			for (int k = -(kW/2); k <= kW/2; k++)
 			{
 				//for everything neighboring pixel within radius in the y direction
-				for (int l = 0; l < kH; l++)
+				for (int l = -(kH/2); l <= kH/2; l++)
 				{
-					sumOfColor += src[currentPixel + k + l] * kernelArray[count];
+					sumOfColor += src[(j + l)*imgW + (i + k)] * kernelArray[count];
 					count++;
 				}
 			}
-			//divide sum by kernel.size() and store at dst[currentPixel]
-			dst[currentPixel] = sumOfColor / (kW*kH);
+			dst[i + (j*imgW)] = sumOfColor / (kW*kH);
 		}
 	}
 
