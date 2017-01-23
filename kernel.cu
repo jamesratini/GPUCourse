@@ -34,10 +34,45 @@ __global__ void kernel(unsigned char* imageOrig, unsigned char* imageCopy, unsig
 		imageCopy[j] = 0;
 	}
 }
+__global__ void convolutionGPU(unsigned char* imageOrig, unsigned char* imageCopy, int imgW, int imgH, unsigned char* kernelArray, int kW, int kH)
+{
+	int x = blockIdx.x * blockDim.x + threadIdx.x;
+	int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+	int kernel_size, half_kernel_size;
+	kernel_size = 3;
+	half_kernel_size = kernel_size / 2;
+	float sumOfColor = 0.0;
+	int count = 0;
+
+	//go through the rows
+	for (int i = -half_kernel_size; i < half_kernel_size; i++ )
+	{
+		if (i + y < 0 || i + y >= imgH)
+			continue;
+
+		sumOfColor += *(imageOrig + (i + y) * imgW + x) * kernelArray[count];
+		for (int j = 1; j < kW / 2; j++)
+		{
+			if (x - j >= 0)
+			{
+				sumOfColor += *(imageOrig + (i + y) * imgW - i + x) * kernelArray[count];
+			}
+			if (x + j < imgW)
+			{
+				sumOfColor += *(imageOrig + (i + y) * imgW + i + x) * kernelArray[count];
+			}
+			count++;
+		}
+		
+	}
+	*(imageCopy + y * imgW + x) = (unsigned char)(sumOfColor / (kW * kH));
+}
 
 void Threshold(Mat image, unsigned char threshold);
 void thresholdWithCuda(Mat* image, unsigned char threshold);
 unsigned char* BoxFilter(unsigned char* src, unsigned char* dst, int imgW, int imgH, unsigned char* kernelArray, int kW, int kH, unsigned char* temp);
+void BoxFilterGPU(Mat* hostImage, unsigned char* src, unsigned char* dst, int imgW, int imgH, unsigned char* kernelArray, int kW, int kH);
 
 void on_Trackbar(int, void *)
 {
@@ -51,7 +86,7 @@ void on_Trackbar(int, void *)
 		throw("trackbar memcopy failed");
 	}
 
-	imshow("Display window", hostImage);
+	imshow("Display", hostImage);
 }
 
 int main(int argc, char** argv)
@@ -87,18 +122,27 @@ int main(int argc, char** argv)
 
 	imgWidth = hostImage.cols;
 	imgHeight = hostImage.rows;
+
 	imageDst = hostImage.data;
 	temp = hostImage.data;
 
-	temp = BoxFilter(hostImage.data, imageDst, imgWidth, imgHeight, K, 3, 3, temp);
-	hostImage.data = temp;
+	// create window and display original image
+	namedWindow("Display", WINDOW_NORMAL);
+	resizeWindow("Display", 1900, 1080);
+	//createTrackbar("Threshold", "Display", &thresholdSlider, THRESHOLD_SLIDER_MAX, on_Trackbar);
+	imshow("Display", hostImage);
+	waitKey(0);
 
-	namedWindow("Display window", WINDOW_NORMAL);
-	resizeWindow("Display window", 1900, 1080);
-	createTrackbar("Threshold", "Display window", &thresholdSlider, THRESHOLD_SLIDER_MAX, on_Trackbar);
-	imshow("Display window", hostImage);
+	//temp = BoxFilter(hostImage.data, imageDst, imgWidth, imgHeight, K, 3, 3, temp);
+	BoxFilterGPU(&hostImage, dev0_image, devCopy_image, imgWidth, imgHeight, K, 3, 3);
+
+	//hostImage.data = temp;
+
+	//display new blurred image
+	imshow("Display", hostImage);
 
 	waitKey(0);
+
 	return 0;
 }
 
@@ -118,6 +162,72 @@ void Threshold(Mat hostImage, unsigned char threshold)
 			hostImage.data[i] = 0;
 		}
 	}
+}
+void BoxFilterGPU(Mat* hostImage, unsigned char* src, unsigned char* dst, int imgW, int imgH, unsigned char* kernelArray, int kW, int kH)
+{
+	cudaError_t cudaStatus;
+	int imageSize = imgW * imgH;
+
+	try
+	{
+		cudaStatus = cudaSetDevice(0);
+		if (cudaStatus != cudaSuccess)
+		{
+			throw("error in set device");
+		}
+
+		cudaStatus = cudaGetDeviceProperties(&deviceProps, 0);
+		if (cudaStatus != cudaSuccess) {
+			throw("getDeviceProperties failed");
+		}
+
+		cudaStatus = cudaMalloc((void**)&src, imageSize);
+		if (cudaStatus != cudaSuccess)
+		{
+			throw("cudaMalloc failed");
+		}
+
+		cudaStatus = cudaMalloc((void**)&dst, imageSize);
+		if (cudaStatus != cudaSuccess)
+		{
+			throw("cudaMalloc failed");
+		}
+
+		cudaStatus = cudaMemcpy(src, hostImage->data, imageSize, cudaMemcpyHostToDevice);
+		if (cudaStatus != cudaSuccess)
+		{
+			throw("mem copy failed 1");
+		}
+
+		int blocksNeeded = (imageSize + deviceProps.maxThreadsPerBlock - 1) / deviceProps.maxThreadsPerBlock;
+
+		convolutionGPU << <blocksNeeded, deviceProps.maxThreadsPerBlock >> >(src, dst, imgW, imgH, kernelArray, kW, kH);
+		if (cudaGetLastError() != cudaSuccess)
+			throw("add Kernel failed");
+
+		cudaStatus = cudaDeviceSynchronize();
+		if (cudaStatus != cudaSuccess)
+		{
+			throw("device sync failed");
+			
+		}
+
+		cudaStatus = cudaMemcpy(hostImage->data, dst, imageSize, cudaMemcpyDeviceToHost);
+		if (cudaStatus != cudaSuccess)
+		{
+			throw("mem copy failed 2");
+		}
+	}
+	catch (char* error)
+	{
+		cout << error << endl;
+		
+		goto bad_exit;
+	}
+bad_exit:
+	cudaFree((void*)&dev0_image);
+	cudaFree((void*)&devCopy_image);
+	
 }
 void thresholdWithCuda(Mat* hostImage, unsigned char threshold)
 {
@@ -185,10 +295,11 @@ bad_exit:
 unsigned char* BoxFilter(unsigned char* src, unsigned char* dst, int imgW, int imgH, unsigned char* kernelArray, int kW, int kH, unsigned char* temp)
 {
 	float sumOfColor = 0;
-	for (int i = 1; i < imgW - 1; i++)
+	for (int x = 1; x < imgW - 1; x++)
 	{
-		for (int j = 1; j < imgH - 1; j++)
+		for (int y = 1; y < imgH - 1; y++)
 		{
+			sumOfColor = 0;
 			int count = 0;
 			//for every neighboring pixel within radius in the x direction
 			for (int k = -(kW/2); k <= kW/2; k++)
@@ -196,11 +307,11 @@ unsigned char* BoxFilter(unsigned char* src, unsigned char* dst, int imgW, int i
 				//for everything neighboring pixel within radius in the y direction
 				for (int l = -(kH/2); l <= kH/2; l++)
 				{
-					sumOfColor += src[(j + l)*imgW + (i + k)] * kernelArray[count];
+					sumOfColor += src[(y + l)*imgW + (x + k)] * kernelArray[count];
 					count++;
 				}
 			}
-			dst[i + (j*imgW)] = sumOfColor / (kW*kH);
+			*(dst + y * imgW + x) = (unsigned char)(sumOfColor / (kW*kH));
 		}
 	}
 
