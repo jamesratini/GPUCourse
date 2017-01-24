@@ -42,37 +42,28 @@ __global__ void convolutionGPU(unsigned char* imageOrig, unsigned char* imageCop
 	int kernel_size, half_kernel_size;
 	kernel_size = 3;
 	half_kernel_size = kernel_size / 2;
-	float sumOfColor = 0.0;
+	int sumOfColor = 0;
+	float divisor = 9;
 	int count = 0;
 
-	//go through the rows
-	for (int i = -half_kernel_size; i < half_kernel_size; i++ )
+	unsigned char* kp = kernelArray + half_kernel_size;
+	
+	for (int i = -half_kernel_size; i <= half_kernel_size; i++)
 	{
-		if (i + y < 0 || i + y >= imgH)
-			continue;
-
-		sumOfColor += *(imageOrig + (i + y) * imgW + x) * kernelArray[count];
-		for (int j = 1; j < kW / 2; j++)
+		for (int j = -half_kernel_size; j <= half_kernel_size; j++)
 		{
-			if (x - j >= 0)
-			{
-				sumOfColor += *(imageOrig + (i + y) * imgW - i + x) * kernelArray[count];
-			}
-			if (x + j < imgW)
-			{
-				sumOfColor += *(imageOrig + (i + y) * imgW + i + x) * kernelArray[count];
-			}
+			sumOfColor += imageOrig[(y + i) * imgW + (x + j)] * kernelArray[count];
 			count++;
 		}
-		
 	}
-	*(imageCopy + y * imgW + x) = (unsigned char)(sumOfColor / (kW * kH));
+
+	*(imageCopy + y * imgW + x) = (unsigned char)(sumOfColor / (kW*kH));
 }
 
 void Threshold(Mat image, unsigned char threshold);
 void thresholdWithCuda(Mat* image, unsigned char threshold);
 unsigned char* BoxFilter(unsigned char* src, unsigned char* dst, int imgW, int imgH, unsigned char* kernelArray, int kW, int kH, unsigned char* temp);
-void BoxFilterGPU(Mat* hostImage, unsigned char* src, unsigned char* dst, int imgW, int imgH, unsigned char* kernelArray, int kW, int kH);
+void BoxFilterGPU(Mat* hostImage, int imgW, int imgH, unsigned char* kernelArray, int kW, int kH);
 
 void on_Trackbar(int, void *)
 {
@@ -133,10 +124,11 @@ int main(int argc, char** argv)
 	imshow("Display", hostImage);
 	waitKey(0);
 
-	//temp = BoxFilter(hostImage.data, imageDst, imgWidth, imgHeight, K, 3, 3, temp);
-	BoxFilterGPU(&hostImage, dev0_image, devCopy_image, imgWidth, imgHeight, K, 3, 3);
+	// CPU BOX FILTER
+	//tempImage.data = BoxFilter(hostImage.data, imageDst, imgWidth, imgHeight, K, 3, 3, temp);
 
-	//hostImage.data = temp;
+	// GPU BOX FILTER
+	BoxFilterGPU(&hostImage, imgWidth, imgHeight, K, 3, 3);
 
 	//display new blurred image
 	imshow("Display", hostImage);
@@ -163,10 +155,11 @@ void Threshold(Mat hostImage, unsigned char threshold)
 		}
 	}
 }
-void BoxFilterGPU(Mat* hostImage, unsigned char* src, unsigned char* dst, int imgW, int imgH, unsigned char* kernelArray, int kW, int kH)
+void BoxFilterGPU(Mat* hostImage, int imgW, int imgH, unsigned char* kernelArray, int kW, int kH)
 {
 	cudaError_t cudaStatus;
 	int imageSize = imgW * imgH;
+	unsigned char* kp;
 
 	try
 	{
@@ -181,27 +174,37 @@ void BoxFilterGPU(Mat* hostImage, unsigned char* src, unsigned char* dst, int im
 			throw("getDeviceProperties failed");
 		}
 
-		cudaStatus = cudaMalloc((void**)&src, imageSize);
+		cudaStatus = cudaMalloc((void**)&dev0_image, imageSize);
 		if (cudaStatus != cudaSuccess)
 		{
 			throw("cudaMalloc failed");
 		}
 
-		cudaStatus = cudaMalloc((void**)&dst, imageSize);
+		cudaStatus = cudaMalloc((void**)&devCopy_image, imageSize);
 		if (cudaStatus != cudaSuccess)
 		{
 			throw("cudaMalloc failed");
 		}
-
-		cudaStatus = cudaMemcpy(src, hostImage->data, imageSize, cudaMemcpyHostToDevice);
+		cudaStatus = cudaMalloc((void**)&kp, ((kH * kW) * sizeof(int)));
+		if (cudaStatus != cudaSuccess)
+		{
+			throw("cudaMalloc kernel failed");
+		}
+		cudaStatus = cudaMemcpy(dev0_image, hostImage->data, imageSize, cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess)
 		{
 			throw("mem copy failed 1");
 		}
+		cudaStatus = cudaMemcpy(kp, kernelArray, ((kH * kW) * sizeof(int)), cudaMemcpyHostToDevice);
+		if (cudaStatus != cudaSuccess)
+		{
+			throw("mem copy kernel failed");
+		}
 
-		int blocksNeeded = (imageSize + deviceProps.maxThreadsPerBlock - 1) / deviceProps.maxThreadsPerBlock;
+		int blocksNeeded = 30000;//(imageSize + deviceProps.maxThreadsPerBlock - 1) / deviceProps.maxThreadsPerBlock;
+		dim3 grid = ((hostImage->cols + 1023) / 1024, hostImage->rows);
 
-		convolutionGPU << <blocksNeeded, deviceProps.maxThreadsPerBlock >> >(src, dst, imgW, imgH, kernelArray, kW, kH);
+		convolutionGPU << <grid, deviceProps.maxThreadsPerBlock >> >(dev0_image, devCopy_image, imgW, imgH, kp, kW, kH);
 		if (cudaGetLastError() != cudaSuccess)
 			throw("add Kernel failed");
 
@@ -211,12 +214,13 @@ void BoxFilterGPU(Mat* hostImage, unsigned char* src, unsigned char* dst, int im
 			throw("device sync failed");
 			
 		}
-
-		cudaStatus = cudaMemcpy(hostImage->data, dst, imageSize, cudaMemcpyDeviceToHost);
+		cudaStatus = cudaMemcpy(hostImage->data, devCopy_image, imageSize, cudaMemcpyDeviceToHost);
 		if (cudaStatus != cudaSuccess)
 		{
 			throw("mem copy failed 2");
 		}
+
+		
 	}
 	catch (char* error)
 	{
